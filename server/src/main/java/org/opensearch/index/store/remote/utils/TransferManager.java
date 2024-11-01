@@ -59,6 +59,7 @@ public class TransferManager {
      * @param blobFetchRequest to fetch
      * @return future of IndexInput augmented with internal caching maintenance tasks
      */
+    @SuppressWarnings("removal")
     public IndexInput fetchBlob(BlobFetchRequest blobFetchRequest) throws IOException {
 
         final Path key = blobFetchRequest.getFilePath();
@@ -94,44 +95,50 @@ public class TransferManager {
 
     @SuppressWarnings("removal")
     private static FileCachedIndexInput createIndexInput(FileCache fileCache, StreamReader streamReader, BlobFetchRequest request) {
-        try {
-            // This local file cache is ref counted and may not strictly enforce configured capacity.
-            // If we find available capacity is exceeded, deny further BlobFetchRequests.
-            if (fileCache.capacity() < fileCache.usage().usage()) {
-                fileCache.prune();
-                throw new IOException(
-                    "Local file cache capacity ("
-                        + fileCache.capacity()
-                        + ") exceeded ("
-                        + fileCache.usage().usage()
-                        + ") - BlobFetchRequest failed: "
-                        + request.getFilePath()
-                );
-            }
-            if (Files.exists(request.getFilePath()) == false) {
-                logger.trace("Fetching from Remote in createIndexInput of Transfer Manager");
-                try (
-                    OutputStream fileOutputStream = Files.newOutputStream(request.getFilePath());
-                    OutputStream localFileOutputStream = new BufferedOutputStream(fileOutputStream)
-                ) {
-                    for (BlobFetchRequest.BlobPart blobPart : request.blobParts()) {
-                        try (
-                            InputStream snapshotFileInputStream = streamReader.read(
-                                blobPart.getBlobName(),
-                                blobPart.getPosition(),
-                                blobPart.getLength()
-                            );
-                        ) {
-                            snapshotFileInputStream.transferTo(localFileOutputStream);
+        // We need to do a privileged action here in order to fetch from remote
+        // and write to the local file cache in case this is invoked as a side
+        // effect of a plugin (such as a scripted search) that doesn't have the
+        // necessary permissions.
+        return AccessController.doPrivileged((PrivilegedAction<FileCachedIndexInput>) () -> {
+            try {
+                // This local file cache is ref counted and may not strictly enforce configured capacity.
+                // If we find available capacity is exceeded, deny further BlobFetchRequests.
+                if (fileCache.capacity() < fileCache.usage().usage()) {
+                    fileCache.prune();
+                    throw new IOException(
+                        "Local file cache capacity ("
+                            + fileCache.capacity()
+                            + ") exceeded ("
+                            + fileCache.usage().usage()
+                            + ") - BlobFetchRequest failed: "
+                            + request.getFilePath()
+                    );
+                }
+                if (Files.exists(request.getFilePath()) == false) {
+                    logger.trace("Fetching from Remote in createIndexInput of Transfer Manager");
+                    try (
+                        OutputStream fileOutputStream = Files.newOutputStream(request.getFilePath());
+                        OutputStream localFileOutputStream = new BufferedOutputStream(fileOutputStream)
+                    ) {
+                        for (BlobFetchRequest.BlobPart blobPart : request.blobParts()) {
+                            try (
+                                InputStream snapshotFileInputStream = streamReader.read(
+                                    blobPart.getBlobName(),
+                                    blobPart.getPosition(),
+                                    blobPart.getLength()
+                                );
+                            ) {
+                                snapshotFileInputStream.transferTo(localFileOutputStream);
+                            }
                         }
                     }
                 }
+                final IndexInput luceneIndexInput = request.getDirectory().openInput(request.getFileName(), IOContext.READ);
+                return new FileCachedIndexInput(fileCache, request.getFilePath(), luceneIndexInput);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
             }
-            final IndexInput luceneIndexInput = request.getDirectory().openInput(request.getFileName(), IOContext.READ);
-            return new FileCachedIndexInput(fileCache, request.getFilePath(), luceneIndexInput);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        });
     }
 
     /**
