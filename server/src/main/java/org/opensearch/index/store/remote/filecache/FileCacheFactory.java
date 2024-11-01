@@ -15,6 +15,9 @@ import org.opensearch.index.store.remote.utils.cache.SegmentedCache;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+
 import static org.opensearch.ExceptionsHelper.catchAsRuntimeException;
 
 /**
@@ -35,6 +38,7 @@ import static org.opensearch.ExceptionsHelper.catchAsRuntimeException;
  *
  * @opensearch.internal
  */
+@SuppressWarnings("removal")
 public class FileCacheFactory {
 
     public static FileCache createConcurrentLRUFileCache(long capacity, CircuitBreaker circuitBreaker) {
@@ -55,7 +59,10 @@ public class FileCacheFactory {
                 Path key = removalNotification.getKey();
                 if (removalReason != RemovalReason.REPLACED) {
                     catchAsRuntimeException(value::close);
-                    catchAsRuntimeException(() -> Files.deleteIfExists(key));
+                    AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
+                        catchAsRuntimeException(() -> Files.deleteIfExists(key));
+                        return null;
+                    });
                 }
             });
     }
